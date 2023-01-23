@@ -1,8 +1,6 @@
-library(docstring)
 ######## General Functions ######## 
  
 #' Read the expression data matrix (fast)
-#' 
 #' Uses fread to increase the reading spead of the expression data
 #' @param data file containing the expression matrix´
 readData <- function(data){
@@ -12,153 +10,124 @@ readData <- function(data){
   return(df)
 }
 
+## Highly variable gene selection ##
+pearson_residuals <- function(counts, theta){
+    counts_sum1 = rowSums(counts)
+    counts_sum0 = colSums(counts)
+    counts_sum  = sum(counts)
 
-getDE <- function(c1, c2,output){
-    if(c1 == c2) return(list(c1,c2,NULL))
-    df <- FindMarkers(pbmc, ident.1 = c1, ident.2 = c2, min.pct = 0.5)
-    DE <- rownames(df)
-    c1 <- unlist(stringr::str_split(c1, " "))[1]
-    c2 <- unlist(stringr::str_split(c2, " "))[1]
-    print(paste(c1,c2))
-    write.table(DE,
-        paste(output, stringr::str_replace_all(c1, " ", "_"), stringr::str_replace(c2, " ", "_"), sep="_"), quote=F, row.names=F)
-    return(list(c1,c2, DE))
+    #get residuals
+    mu = (counts_sum1  %*% t(counts_sum0)) / counts_sum
+    z = (counts - mu) / sqrt(mu + mu**2/theta)
+
+    #clip to sqrt(n)
+    n = ncol(counts)
+    z[z >  sqrt(n)] = sqrt(n)
+    z[z < -sqrt(n)] = -sqrt(n)
+    return(as.matrix(z))
+}
+
+select_hvg <- function(data, hvgs){
+  residuals = pearson_residuals(data,200)
+  residual_var = matrixStats::rowVars(residuals)
+  names(residual_var) <- rownames(residuals)
+  residual_var <- names(residual_var[order(residual_var, decreasing = T)])
+  data = data[head(residual_var, hvgs), ]
+  return(data)
 }
 
 
-getMeans <- function(d, datasets){
-   genes <- unlist(lapply(datasets, function(set) length(d$x[d$x %in% set$V1])))
-   return(mean(genes))                      
+## Preprocessing  the data ##
+prepareData <- function(data, meta, project, hvgs=200, features=NULL){
+    counts <- as.data.frame(readData(data))
+    metadata <- read.csv(meta)
+    metadata <- metadata[metadata$id %in% colnames(counts),]
+    counts <- counts[, colnames(counts) %in% metadata$id]
+    rownames(metadata)<- metadata$id
+    
+    counts <- preprocessing(counts, features=features, hvgs=hvgs)
+    obj <-  CreateSeuratObject(counts = counts, meta.data = metadata) 
+
+  return(obj)
 }
 
-add_column_DE <- function(folder, pattern, method, df, name){
-    folders <- list.files(folder, full.names = T, pattern = pattern)
-    dd <- folders[stringr::str_detect(folders,method)]
-    datasets <- lapply(dd, function(folder) 
-                       as.data.frame(read.csv(paste(sep="/", folder, "feature_names.txt"),
-                                              header=F), header=F))
-    df[,name] <- (unlist(lapply(data, function(d) getMeans(d, datasets)))) 
-    return(df)                           
-}                          
-     
-                                
-summarize_data <- function(data, label=NULL, steps=NULL){
-    if(!is.null(label)) data <- data[data$Version == label,]
-    if(!is.null(label)) data <- data[data$CellsPerCelltype %in% steps,]
-    
-    data_melt <- reshape2::melt(data, value.name = "Accuracy",
-                                id.vars = c("Method", "Version", "CellsPerCelltype", "SetNr"))
-    
-    colnames(data_melt)[colnames(data_melt) == "variable"] <- "CellType"
-    data_summary <- data_melt %>%
-                    group_by(Method, Version, CellsPerCelltype, CellType) %>%
-                    summarise(mean = mean(Accuracy),
-                              sd= sd(Accuracy),
-                              q25= quantile(Accuracy, probs=0.25),
-                              q75= quantile(Accuracy, probs=0.75),
-                              median = median(Accuracy))
-    
-    return(as.data.frame(data_summary))   
+preprocessing <- function(data, features=NULL, hvgs=200){
+    if(!is.null(features)){
+      data <- data[rownames(data) %in% features, ]
+    } else data <- select_hvg(data, hvgs)
+    data <- log2(data + 0.001)
+    data <- as.matrix(data)
+    data <- data/colSums(data)[col(data)]
+    return(data)
 }
 
-get_percentage_predictions <- function(predictions,version, method, size, nrSets=20){
-    name <- paste(sep="_", version, method)
-    set <-  paste(sep="_", version, method, size)
-    predictions[, name] <- rowSums(predictions[, stringr::str_detect(colnames(predictions), set)])
-    predictions[, name] <- (predictions[, name] * 100) / nrSets
-    predictions[is.na(predictions[,name]), name ] <- 0 
-    return(predictions)
+getFileName <- function(folder, type, set){
+  name <- paste(folder, paste(type, set, sep="_"), sep="/")
+  return(paste(name, "csv", sep="."))
 }
 
-prepare_umap <- function(file_train, file_test, meta_data,split){
- data_train <- readData(file_train)
- data_test  <- readData(file_test)
- data <- cbind(data_train, data_test)
- 
- pbmc <- Seurat::CreateSeuratObject(data, meta.data = meta_data)
- print(pbmc)
- if(!is.null(split)){
-    pbmc.list <- SplitObject(pbmc, split.by = split)
-     for (i in 1:length(pbmc.list)) {
-    pbmc.list[[i]] <- NormalizeData(pbmc.list[[i]], verbose = FALSE)
-    pbmc.list[[i]] <- FindVariableFeatures(pbmc.list[[i]], selection.method = "vst",
-                                           nfeatures = 2000, verbose = FALSE)
-    }
-    pbmc.anchors <- FindIntegrationAnchors(object.list = pbmc.list, dims = 1:10, verbose = F)
-    pbmc.integrated <- IntegrateData(anchorset = pbmc.anchors, dims = 1:10, verbose = FALSE, k.weight=10)
-    DefaultAssay(pbmc.integrated) <- "integrated"
- } else{
-    pbmc.integrated <- NormalizeData(pbmc, verbose = FALSE)
-    pbmc.integrated  <- FindVariableFeatures(pbmc.integrated, selection.method = "vst",
-                                           nfeatures = 2000, verbose = FALSE)
- }
- pbmc.integrated  <- Seurat::ScaleData(pbmc.integrated, verbose = F)
- pbmc.integrated  <- Seurat::RunPCA(pbmc.integrated, features = Seurat::VariableFeatures(object = pbmc.integrated), verbose = F)
- pbmc.integrated  <- Seurat::RunUMAP(pbmc.integrated, dims = 1:10, verbose = F) 
- return(pbmc.integrated)
+getFiles <- function(datafile, metafile=NULL,set=NULL, output=NULL, features=NULL, hvgs=500){
+    print(paste(set, output))
+    data <- readData(datafile)
+    metadata <- read.csv(metafile)
+    metadata <- metadata[metadata$id %in% colnames(data),]
+    metadata <- metadata[order(metadata$class_),]
+    data <- data[, colnames(data) %in% metadata$id]
+    rownames(metadata)<- metadata$id
+    if(!is.null(features))  data <- data[rownames(data) %in% features, ]
+    # We skip the preprocessing step since ItClust has internal processing
+    #data <- preprocessing(data, features=features, hvgs=hvgs)
+    data <- data[order(rownames(data)),]
+    
+    metadata <- metadata[metadata$id %in% colnames(data),]
+    data <- data[, metadata$id]
+
+    write.table(t(data), getFileName(output, "data", set), sep=",", quote=F,
+              row.names = F, col.names = T)
+    
+    write.table(colnames(data), getFileName(output, "cells", set), sep=",", quote=F,
+                          row.names = F, col.names = F)
+
+    write.table(metadata, getFileName(output, "meta", set), sep=",", quote=F,
+              row.names = F, col.names = T)
+    return(data)
 }
 
-getData <- function(folder, attention_file, seed, attentionNames, expressionNames){
-    folder <- paste(sep="_", folder, seed)
-    attention_file <- paste0(attention_file, "_",seed, "/attentionmap.txt")
-    
-    train <- read.csv(paste(sep="/", folder, "data_train.txt"))
-    features <- read.csv(paste(sep="/", folder, "feature_names.txt"), header=F)
-    rownames(train)<- features$V1
-    
-    meta <- read.csv(paste(sep="/", folder, "classes_train.txt"))
-    types <- unique(meta$class_)
-    
-    classes <- lapply(types, function(type) train[,colnames(train) %in% meta$id[meta$class_ == type]])
-    means <-  lapply(classes, function(class) rowMeans(class))
-    names(means) <- types
-                        
-    train_summary <- do.call(cbind, means)
-    colnames(train_summary)<- expressionNames
- 
-    test <- read.csv(paste(sep="/", folder, "data_test.txt"))
-    rownames(test)<- features$V1
-    
-    meta <- read.csv(paste(sep="/", folder, "classes_test.txt"))
-    types <- unique(meta$class_)               
-    
-    classes <- lapply(types, function(type) test[,colnames(test) %in% meta$id[meta$class_ == type]])
-    means <-  lapply(classes, function(class) rowMeans(class))
-    names(means) <- types
-    
-    test_summary <- do.call(cbind, means)
-    colnames(test_summary)<- paste0("Test", expressionNames)
-                       
-                     
-    attention <- read.csv(attention_file, sep="\t")
-    attention <- attention[,2:ncol(attention)]
-    colnames(attention) <- attentionNames
-    rownames(attention) <- features$V1
+getExperiment <- function(datafile, metafile=NULL, features=NULL, hvgs=200){
+    data <- readData(datafile)
+    metadata <- read.csv(metafile)
+    metadata <- metadata[metadata$id %in% colnames(data),]
+    data <- data[,colnames(data) %in% metadata$id]
+    rownames(metadata)<- metadata$id
+    data <- preprocessing(data, features=features, hvgs=hvgs)
+    data <- data[, order(colnames(data))]
 
-    data <- cbind(train_summary,attention)
-    data <- cbind(test_summary,data)
-                     
-    corr <- cor(data)
-    corr_lower <- get_lower_tri(corr)
-    cor_melt <- reshape2::melt(corr_lower, na.rm = TRUE)
+    experiment <- SingleCellExperiment::SingleCellExperiment(list(logcounts=data))
+    metadata <- metadata[metadata$id %in% colnames(data),]
+    SingleCellExperiment::colLabels(experiment) <- metadata$class_[order(metadata$id)]
 
-    cor_melt <- tidyr::separate(cor_melt,Var1,into = c("Type1","Celltype1"),sep = " ",remove = TRUE,extra = "merge")
-    cor_melt <- tidyr::separate(cor_melt,Var2,into = c("Type2","Celltype2"),sep = " ",remove = TRUE,extra = "merge")
-    cor_melt$Type1<- factor(cor_melt$Type1, levels = c("Expression", "Attention", "TestExpression"))
-    cor_melt$Type2<- factor(cor_melt$Type2, levels = c("Expression", "Attention", "TestExpression"))
-    cor_melt$Seed <- seed
-    return(cor_melt)
+  return(experiment)
 }
 
-                 
-# Get lower triangle of the correlation matrix
-  get_lower_tri<-function(cormat){
-    cormat[upper.tri(cormat)] <- NA
-    return(cormat)
-  }
-  # Get upper triangle of the correlation matrix
-  get_upper_tri <- function(cormat){
-    cormat[lower.tri(cormat)]<- NA
-    return(cormat)
-  }
+get_measures <- function(data, type, ref, method, size, set){
+    data <- data[data$Reference == ref & data$Approach == method & data$Size == size & data$Set == set,] #
+    tp <- length(data$Prediction[data$Prediction == type & data$class == type])
+    fp <- length(data$Prediction[data$Prediction == type & data$class != type])
+    fn <- length(data$Prediction[data$Prediction != type & data$class == type])
+    tn <- length(data$Prediction[data$Prediction != type & data$class != type])
+    precision <- tp / (tp + fp)
+    recall <- tp / (tp + fn)
+    f1 <- 2*(precision * recall) / (precision + recall)
+    accuracy <- (tp) / length(data$Prediction[data$class == type])
+    print(data.frame("class"=type,"reference"=ref,"method"=method,"size"=size,"set"=set,
+                      "precision"=precision,"recall"=recall,"f1"=f1, "accuracy"=accuracy))
+    return(data.frame("class"=type,"reference"=ref,"method"=method,"size"=size,"set"=set,
+                      "precision"=precision,"recall"=recall,"f1"=f1, "accuracy"=accuracy))
+}
 
+getAccuracy <- function(data, col){
+    pred <- data$class_ == data[, col]
+    pred[pred == TRUE] <- 1
+    pred[is.na(pred)] <- 0
+    return( sum(pred) / nrow(data))
+}
