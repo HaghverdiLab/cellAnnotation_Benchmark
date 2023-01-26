@@ -109,21 +109,7 @@ getExperiment <- function(datafile, metafile=NULL, features=NULL, hvgs=200){
   return(experiment)
 }
 
-get_measures <- function(data, type, ref, method, size, set){
-    data <- data[data$Reference == ref & data$Approach == method & data$Size == size & data$Set == set,] #
-    tp <- length(data$Prediction[data$Prediction == type & data$class == type])
-    fp <- length(data$Prediction[data$Prediction == type & data$class != type])
-    fn <- length(data$Prediction[data$Prediction != type & data$class == type])
-    tn <- length(data$Prediction[data$Prediction != type & data$class != type])
-    precision <- tp / (tp + fp)
-    recall <- tp / (tp + fn)
-    f1 <- 2*(precision * recall) / (precision + recall)
-    accuracy <- (tp) / length(data$Prediction[data$class == type])
-    print(data.frame("class"=type,"reference"=ref,"method"=method,"size"=size,"set"=set,
-                      "precision"=precision,"recall"=recall,"f1"=f1, "accuracy"=accuracy))
-    return(data.frame("class"=type,"reference"=ref,"method"=method,"size"=size,"set"=set,
-                      "precision"=precision,"recall"=recall,"f1"=f1, "accuracy"=accuracy))
-}
+
 
 getAccuracy <- function(data, col){
     pred <- data$class_ == data[, col]
